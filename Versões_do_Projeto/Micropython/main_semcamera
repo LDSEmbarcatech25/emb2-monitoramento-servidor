@@ -1,0 +1,262 @@
+# =============================================================================
+# RESIDÊNCIA TIC18 - EMBARCATECH
+# PROJETO: MONITORIZAÇÃO REMOTA (KiiRA v2.0 - PROTOCOLO DIRECT-CONNECT)
+# =============================================================================
+
+import machine
+import time
+import network
+import uasyncio as asyncio
+import random
+import usocket as socket
+import ustruct as struct
+from ssd1306 import SSD1306_I2C
+
+# =============================================================================
+# 1. CONFIGURAÇÕES, CREDENCIAIS E DIRETIVAS DE REDE (ADAFRUIT IO)
+# =============================================================================
+WIFI_SSID = "ITSelf"
+WIFI_PASS = "code2020"
+
+ADAFRUIT_USER = "rafaelbrandaorb"
+ADAFRUIT_KEY  = "aio_pkac63za0hDRftR2ayLgkrsvb7sl"
+
+MQTT_BROKER = "io.adafruit.com"
+MQTT_PORT   = 1883
+CLIENT_ID   = f"kiira_{random.randint(10, 99)}" 
+
+TOPIC_TELEMETRIA = f"{ADAFRUIT_USER}/feeds/clima".encode()
+TOPIC_COMANDOS   = f"{ADAFRUIT_USER}/feeds/comandos".encode()
+
+# =============================================================================
+# 2. DEFINIÇÃO DE PINOS DA PLACA KiiRA v2.0
+# =============================================================================
+PIN_RELE = 47  
+PIN_SDA  = 14  
+PIN_SCL  = 21  
+
+rele_reset = machine.Pin(PIN_RELE, machine.Pin.OUT)
+rele_reset.value(1)  
+
+sock_global    = None
+pid_packet     = 0
+temp_local     = 0.0
+umid_local     = 0.0
+status_local   = "ONLINE"
+callback_ativo = None
+
+i2c_global   = None
+oled         = None
+hdc_endereco = 0x40  
+hardware_ok  = False
+
+i2c_lock = asyncio.Lock()
+
+# =============================================================================
+# 3. INTERFACE DE HARDWARE
+# =============================================================================
+def inicializar_hardware():
+    global i2c_global, oled, hardware_ok
+    try:
+        i2c_global = machine.I2C(0, scl=machine.Pin(PIN_SCL), sda=machine.Pin(PIN_SDA), freq=100000)
+        print("[HARDWARE] Barramento I2C físico unificado a 100kHz.")
+        try:
+            oled = SSD1306_I2C(128, 64, i2c_global)
+            hardware_ok = True
+            print("[HARDWARE] Periféricos I2C mapeados com sucesso.")
+        except Exception as e:
+            print("[ERRO HARDWARE] Falha ao acoplar display:", e)
+    except Exception as e:
+        print("[ERRO CRÍTICO] Falha ao erguer barramento elemental:", e)
+
+async def atualizar_oled_seguro(linha1, linha2, linha3):
+    if hardware_ok and oled is not None:
+        async with i2c_lock:
+            try:
+                oled.fill(0)  
+                oled.text("KiiRA v2.0 - TI", 5, 0)
+                oled.text("----------------", 0, 10)
+                oled.text(linha1, 0, 25)
+                oled.text(linha2, 0, 40)
+                oled.text(linha3, 0, 55)
+                oled.show()  
+            except Exception as e:
+                pass
+
+# =============================================================================
+# 4. IMPLEMENTAÇÃO DIRETA E BLINDADA DO PROTOCOLO MQTT (SEM DEPENDÊNCIAS)
+# =============================================================================
+def mqtt_enviar_str(s):
+    global sock_global
+    sock_global.write(struct.pack("!H", len(s)))
+    sock_global.write(s)
+
+def mqtt_conectar_broker():
+    global sock_global
+    addr = socket.getaddrinfo(MQTT_BROKER, MQTT_PORT)[0][-1]
+    sock_global = socket.socket()
+    sock_global.connect(addr)
+    
+    premsg = bytearray(b"\x00\x04MQTT\x04\xC2\x00\x3C") # Clean Session, User e Password ativos, Keepalive 60s
+    
+    # Cálculo preciso do tamanho total do Payload de autenticação
+    length = len(premsg) + 2 + len(CLIENT_ID) + 2 + len(ADAFRUIT_USER) + 2 + len(ADAFRUIT_KEY)
+    
+    msg = bytearray([0x10, length])
+    sock_global.write(msg)
+    sock_global.write(premsg)
+    
+    mqtt_enviar_str(CLIENT_ID)
+    mqtt_enviar_str(ADAFRUIT_USER)
+    mqtt_enviar_str(ADAFRUIT_KEY)
+    
+    resp = sock_global.read(4)
+    if resp and resp[0] == 0x20 and resp[3] == 0:
+        return True
+    return False
+
+def mqtt_inscrever_topico(topico):
+    global sock_global, pid_packet
+    pid_packet += 1
+    length = 2 + 2 + len(topico) + 1
+    packet = struct.pack("!BBH", 0x82, length, pid_packet)
+    sock_global.write(packet)
+    sock_global.write(struct.pack("!H", len(topico)))
+    sock_global.write(topico)
+    sock_global.write(b"\x00") # QoS 0
+    sock_global.read(5) # Limpa resposta SUBACK do buffer
+
+def mqtt_publicar_telemetria(topico, msg):
+    global sock_global
+    pkt = bytearray([0x30, 2 + len(topico) + len(msg)])
+    sock_global.write(pkt)
+    mqtt_enviar_str(topico)
+    sock_global.write(msg)
+
+# =============================================================================
+# 5. CALLBACK DE EVENTOS E FUNÇÕES DE RESET
+# =============================================================================
+def tratar_comandos_remotos(msg):
+    print(f"\n[ADAFRUIT IO] Comando recebido: {msg}")
+    if "HARD_RESET" in msg or msg == "1":
+        asyncio.create_task(executar_reset_hardware())
+
+async def executar_reset_hardware():
+    global status_local
+    status_local = "RESET TI"
+    await atualizar_oled_seguro("SISTEMA: RESET", "RELE: ATIVADO", "CIRCUITO ABERTO")
+    print("[RELÉ] Abrindo contacto mecânico (Desligando Rack)...")
+    rele_reset.value(0)  
+    await asyncio.sleep(5)  
+    print("[RELÉ] Restabelecendo energia (Ligando Rack)...")
+    rele_reset.value(1)  
+    status_local = "ONLINE"
+
+# =============================================================================
+# 6. ROTINAS ASSÍNCRONAS
+# =============================================================================
+async def loop_telemetria_clima():
+    while True:
+        try:
+            if hardware_ok and i2c_global is not None:
+                async with i2c_lock:
+                    i2c_global.writeto(hdc_endereco, b'\x00')
+                    await asyncio.sleep_ms(30)  
+                    dados = i2c_global.readfrom(hdc_endereco, 4)
+                    
+                    temp_raw = (dados[0] << 8) | dados[1]
+                    temp_local = (temp_raw / 65536.0) * 165.0 - 40.0
+                    
+                    umid_raw = (dados[2] << 8) | dados[3]
+                    umid_local = (umid_raw / 65536.0) * 100.0
+            
+            payload = f"{temp_local:.2f}"
+            mqtt_publicar_telemetria(TOPIC_TELEMETRIA, payload.encode())
+            print(f"[TELEMETRIA] Enviado para Adafruit: {payload} C")
+            
+            await atualizar_oled_seguro(f"Temp: {temp_local:.1f} C", f"Umid: {umid_local:.1f} %", f"Status: {status_local}")
+            
+        except Exception as e:
+            print("[ERRO TELEMETRIA] Falha no ciclo de leitura ou envio:", e)
+            
+        await asyncio.sleep(20)
+
+async def loop_escuta_broker():
+    global sock_global
+    while True:
+        try:
+            sock_global.setblocking(False)
+            res = sock_global.read(1)
+            sock_global.setblocking(True)
+            
+            if res and res[0] & 0xF0 == 0x30: # Tipo de pacote PUBLISH vindo do Broker
+                # Descobre o tamanho do pacote recebido
+                sz = sock_global.read(1)[0]
+                topic_len = struct.unpack("!H", sock_global.read(2))[0]
+                sock_global.read(topic_len) # Pula a leitura do nome do tópico
+                
+                msg_len = sz - 2 - topic_len
+                mensagem_bruta = sock_global.read(msg_len).decode().strip()
+                tratar_comandos_remotos(mensagem_bruta)
+                
+        except Exception:
+            pass
+        await asyncio.sleep_ms(150)
+
+# =============================================================================
+# 7. ORQUESTRAÇÃO GERAL
+# =============================================================================
+async def main():
+    inicializar_hardware()
+    await atualizar_oled_seguro("Iniciando...", "Estabilizando RF", "")
+    
+    wlan = network.WLAN(network.STA_IF)
+    wlan.active(False)
+    await asyncio.sleep(1) 
+    wlan.active(True)
+    await asyncio.sleep(1)
+    
+    wlan.connect(WIFI_SSID, WIFI_PASS)
+    print(f"[REDE] Conectando ao ponto de acesso: {WIFI_SSID}")
+    
+    timeout_rede = 0
+    while not wlan.isconnected() and timeout_rede < 40:
+        await asyncio.sleep(0.5)
+        print(".", end="")
+        timeout_rede += 1
+        
+    if not wlan.isconnected():
+        print("\n[ERRO] Falha crítica de conexão Wi-Fi.")
+        await atualizar_oled_seguro("ERRO WI-FI", "RESTART BOARD", "")
+        return
+
+    print(f"\n[REDE] Wi-Fi Conectado! IP: {wlan.ifconfig()[0]}")
+    await atualizar_oled_seguro("Wi-Fi: OK", "Adafruit Conn...", "")
+    
+    print(f"[SISTEMA] Autenticando com Adafruit IO ({ADAFRUIT_USER})...")
+    print("[SISTEMA] Conectando ao Socket TCP Direto...")
+    
+    try:
+        if mqtt_conectar_broker():
+            print(f"[SISTEMA] Inscrevendo no Feed: {TOPIC_COMANDOS.decode()}")
+            mqtt_inscrever_topico(TOPIC_COMANDOS)
+            print("[SISTEMA] Conectado e autenticado com sucesso!")
+            await atualizar_oled_seguro("Wi-Fi: CONECTADO", "ADAFRUIT: ATIVO", "KiiRA ONLINE")
+        else:
+            print("[ERRO MQTT] Conexão recusada pela Adafruit. Verifique Usuário/Key.")
+            await atualizar_oled_seguro("Wi-Fi: OK", "ERRO BROKER KEY", "")
+            return
+    except Exception as e:
+        print("[ERRO PROTOCOLO] Falha na construção dos pacotes:", e)
+        await atualizar_oled_seguro("Wi-Fi: OK", "ERRO DE SOCKET", "")
+        return
+
+    await asyncio.gather(
+        loop_telemetria_clima(),
+        loop_escuta_broker()
+    )
+
+try:
+    asyncio.run(main())
+except KeyboardInterrupt:
+    print("\n[SISTEMA] Execução interrompida.")
