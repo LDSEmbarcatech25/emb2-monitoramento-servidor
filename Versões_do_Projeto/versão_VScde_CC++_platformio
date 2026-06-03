@@ -1,0 +1,417 @@
+#include <Arduino.h>
+#include <WiFi.h>
+#include <WebServer.h>
+#include <PubSubClient.h>
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include <LittleFS.h>
+#include "esp_camera.h"
+#include "soc/soc.h"
+#include "soc/rtc_cntl_reg.h"
+
+// ==========================================
+// CONFIGURACOES DE REDE E CREDENCIAIS
+// ==========================================
+const char* WIFI_SSID = "ITSelf";
+const char* WIFI_PASS = "code2020";
+
+const char* ADAFRUIT_USER = "rafaelbrandaorb";
+const char* ADAFRUIT_KEY  = "aio_pkac63za0hDRftR2ayLgkrsvb7sl";
+const char* MQTT_BROKER   = "io.adafruit.com";
+const int   MQTT_PORT     = 1883;
+
+// Topicos Adafruit
+const char* TOPIC_TEMP    = "rafaelbrandaorb/feeds/clima";
+const char* TOPIC_UMID    = "rafaelbrandaorb/feeds/umidade";
+const char* TOPIC_CMD     = "rafaelbrandaorb/feeds/comandos";
+
+// ==========================================
+// PINAGEM OFICIAL DA PLACA KiiRA v2.0
+// ==========================================
+#define PIN_RELE         48
+#define PIN_BOTAO        46
+#define PIN_SDA          14
+#define PIN_SCL          21
+
+// Pinos da Camera
+#define XCLK_GPIO_NUM    15
+#define SIOD_GPIO_NUM     4
+#define SIOC_GPIO_NUM     5
+#define Y9_GPIO_NUM      16
+#define Y8_GPIO_NUM      17
+#define Y7_GPIO_NUM      18
+#define Y6_GPIO_NUM      12
+#define Y5_GPIO_NUM      10
+#define Y4_GPIO_NUM       8
+#define Y3_GPIO_NUM       9
+#define Y2_GPIO_NUM      11
+#define VSYNC_GPIO_NUM    6
+#define HREF_GPIO_NUM     7
+#define PCLK_GPIO_NUM    13
+
+// ==========================================
+// VARIAVEIS GLOBAIS E INSTANCIAS
+// ==========================================
+Adafruit_SSD1306 oled(128, 64, &Wire, -1);
+WiFiClient wifiClient;
+PubSubClient mqttClient(wifiClient);
+WebServer server(8080);
+
+float temp_local = 0.0;
+float umid_local = 0.0;
+String status_local = "ONLINE";
+String meu_ip = "0.0.0.0";
+volatile bool disparar_reset = false;
+unsigned long ultimo_clique = 0;
+const int LIMITE_FOTOS = 10;
+
+// Historico de Logs Web
+std::vector<String> historico_logs;
+SemaphoreHandle_t i2cMutex;
+
+void log_sistema(String texto) {
+    unsigned long segundos = millis() / 1000;
+    String mensagem = "[" + String(segundos) + "s] " + texto;
+    Serial.println(mensagem);
+    historico_logs.push_back(mensagem);
+    if (historico_logs.size() > 5) {
+        historico_logs.erase(historico_logs.begin());
+    }
+}
+
+// Interrupcao do Botao Fisico
+void IRAM_ATTR tratar_botao_local() {
+    unsigned long agora = millis();
+    if (agora - ultimo_clique > 300) {
+        ultimo_clique = agora;
+        disparar_reset = true;
+    }
+}
+
+// Atualizacao segura do OLED
+void atualizar_oled_seguro(String l1, String l2, String l3) {
+    if (xSemaphoreTake(i2cMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        oled.clearDisplay();
+        oled.setTextSize(1);
+        oled.setTextColor(SSD1306_WHITE);
+        oled.setCursor(5, 0);
+        oled.print("Gestor_Kiira");
+        oled.setCursor(0, 10);
+        oled.print("----------------");
+        oled.setCursor(0, 25);  oled.print(l1);
+        oled.setCursor(0, 40);  oled.print(l2);
+        oled.setCursor(0, 55);  oled.print(l3);
+        oled.display();
+        xSemaphoreGive(i2cMutex);
+    }
+}
+
+// Callback do MQTT
+void mqtt_callback(char* topic, byte* payload, unsigned int length) {
+    String msg = "";
+    for (unsigned int i = 0; i < length; i++) msg += (char)payload[i];
+    log_sistema("Nuvem Adafruit enviou comando: " + msg);
+    if (msg == "HARD_RESET" || msg == "1") {
+        disparar_reset = true;
+    }
+}
+
+// ==========================================
+// ROTAS DO SERVIDOR HTTP
+// ==========================================
+
+// Rota 1: Video Stream (MJPEG)
+void handleVideo() {
+    WiFiClient client = server.client();
+    client.println("HTTP/1.1 200 OK");
+    client.println("Content-Type: multipart/x-mixed-replace; boundary=frame");
+    client.println();
+
+    for (int i = 0; i < 12; i++) {
+        camera_fb_t* fb = esp_camera_fb_get();
+        if (!fb) {
+            delay(100);
+            continue;
+        }
+        client.print("--frame\r\nContent-Type: image/jpeg\r\nContent-Length: " + String(fb->len) + "\r\n\r\n");
+        client.write(fb->buf, fb->len);
+        client.print("\r\n");
+        esp_camera_fb_return(fb);
+        delay(120);
+    }
+}
+
+// Rota 2: Home Dashboard Principal HTML (Ajustado sem nenhum acento ou caractere especial)
+void handleRoot() {
+    String img_tag = "<img id='video_feed' src='http://" + meu_ip + ":8080/video'><p style='color:#34d399; font-size:12px; margin:5px 0 0 0;'>Transmissao QVGA Ativa (OV5640)</p>";
+    String classe_status = (status_local == "ONLINE") ? "online" : "resetting";
+    
+    String texto_logs = "";
+    for(const auto& log : historico_logs) texto_logs += log + "\n";
+
+    // Varre o LittleFS para montar a lista da galeria
+    String itens_html = "";
+    File root = LittleFS.open("/fotos");
+    if(!root || !root.isDirectory()) {
+        itens_html = "<div style='color:#64748b; font-style:italic; text-align:center; padding-top:20px;'>Nenhuma foto salva na Flash.</div>";
+    } else {
+        File file = root.openNextFile();
+        int count = 0;
+        while(file) {
+            String fname = String(file.name());
+            if(fname.endsWith(".jpg")) {
+                count++;
+                itens_html += "<div class='item-arquivo'><span>📂 " + fname + "</span><div>";
+                itens_html += "<a href='/ver?file=" + fname + "' target='_blank' class='btn-view'>VER</a>";
+                itens_html += "<a href='/deletar?file=" + fname + "' class='btn-del'>DELETAR</a></div></div>";
+            }
+            file = root.openNextFile();
+        }
+        if(count == 0) itens_html = "<div style='color:#64748b; font-style:italic; text-align:center; padding-top:20px;'>Nenhuma foto salva na Flash.</div>";
+    }
+
+    // Template HTML limpo
+    String html = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\r\n";
+    html += "<!DOCTYPE html><html><head><title>Gestor Kiira</title><meta name='viewport' content='width=device-width, initial-scale=1'>";
+    html += "<style>body{font-family:'Segoe UI',Arial;background:#0f172a;color:#f8fafc;margin:0;padding:20px;display:flex;flex-direction:column;align-items:center;}";
+    html += "h2{color:#38bdf8;}.container{display:flex;flex-wrap:wrap;gap:20px;justify-content:center;max-width:1000px;width:100%;}";
+    html += ".card{background:#1e293b;border:1px solid #334155;border-radius:12px;padding:20px;width:280px;display:flex;flex-direction:column;align-items:center;}";
+    html += ".card-video,.card-galeria{width:100%;max-width:440px;}.card-serial{width:100%;max-width:940px;background:#020617;}";
+    html += ".val{font-size:32px;font-weight:bold;}.status{padding:6px 16px;border-radius:20px;font-weight:bold;}.online{background:#065f46;color:#34d399;}.resetting{background:#991b1b;color:#fca5a5;}";
+    html += ".btn{background:#e11d48;color:white;border:none;padding:14px 28px;border-radius:8px;cursor:pointer;text-decoration:none;text-align:center;width:80%;margin-top:5px;}";
+    html += "pre{color:#4ade80;background:#020617;width:100%;white-space:pre-wrap;}img{width:100%;max-height:260px;border-radius:8px;background:#020617;}";
+    html += ".item-arquivo{display:flex;justify-content:space-between;align-items:center;background:#334155;padding:8px 12px;margin-bottom:6px;border-radius:6px;}";
+    html += ".btn-view{background:#38bdf8;color:#0f172a;padding:4px 10px;text-decoration:none;font-weight:bold;}.btn-del{background:#ef4444;color:white;padding:4px 10px;text-decoration:none;margin-left:5px;}</style></head><body>";
+    html += "<h2>Gestor KiiRA 2.0</h2><div class='container'>";
+    html += "<div class='card card-video'><h3>Monitoramento de Video</h3>" + img_tag + "<a href='/capturar_agora' class='btn' style='background:#10b981;margin-top:15px;'>DISPARAR FOTO</a></div>";
+    html += "<div><div class='card'><span>Temperatura</span><div class='val'>" + String(temp_local, 1) + " Graus C</div></div>";
+    html += "<div class='card'><span>Umidade</span><div class='val'>" + String(umid_local, 1) + " %</div></div>";
+    html += "<div class='card'><span>Status</span><div class='status " + classe_status + "'>" + status_local + "</div><a href='/action_reset' class='btn'>FORCAR HARD RESET</a></div></div>";
+    html += "<div class='card card-galeria'><h3>Galeria Interna (LittleFS)</h3><div class='lista-arquivos'>" + itens_html + "</div><a href='/' class='btn' style='background:#475569;margin-top:15px;'>ATUALIZAR</a></div>";
+    html += "<div class='card card-serial'><span>Monitor Serial Web</span><pre>" + texto_logs + "</pre></div></div></body></html>";
+    
+    server.send(200, "text/html", html);
+}
+
+// Rota 3: Salvar foto no LittleFS
+void handleCapture() {
+    std::vector<String> fList;
+    File root = LittleFS.open("/fotos");
+    File file = root.openNextFile();
+    while(file) {
+        if(String(file.name()).endsWith(".jpg")) fList.push_back(String(file.name()));
+        file = root.openNextFile();
+    }
+    
+    if(fList.size() >= LIMITE_FOTOS) {
+        std::sort(fList.begin(), fList.end());
+        LittleFS.remove("/fotos/" + fList[0]);
+    }
+
+    int proximo_id = fList.size() + 1;
+
+    camera_fb_t* fb = esp_camera_fb_get();
+    if (fb) {
+        File out = LittleFS.open("/fotos/foto_" + String(proximo_id) + ".jpg", FILE_WRITE);
+        if(out) {
+            out.write(fb->buf, fb->len);
+            out.close();
+            log_sistema("Foto registrada no LittleFS: foto_" + String(proximo_id) + ".jpg");
+        }
+        esp_camera_fb_return(fb);
+    }
+    
+    server.sendHeader("Location", "/");
+    server.send(303, "text/plain", "");
+}
+
+// Rota 4: Ver foto individual
+void handleView() {
+    String filename = server.arg("file");
+    File f = LittleFS.open("/fotos/" + filename, FILE_READ);
+    if (!f) {
+        server.send(404, "text/plain", "Nao encontrado");
+        return;
+    }
+    server.streamFile(f, "image/jpeg");
+    f.close();
+}
+
+// Rota 5: Deletar foto
+void handleDeletar() {
+    String filename = server.arg("file");
+    LittleFS.remove("/fotos/" + filename);
+    log_sistema("Arquivo removido da Flash: " + filename);
+    server.sendHeader("Location", "/");
+    server.send(303, "text/plain", "");
+}
+
+// Rota 6: Reset Remoto Web
+void handleReset() {
+    disparar_reset = true;
+    server.sendHeader("Location", "/");
+    server.send(303, "text/plain", "");
+}
+
+// ==========================================
+// TAREFAS PARALELAS FREE RTOS
+// ==========================================
+
+void taskReset(void* pvParameters) {
+    for(;;) {
+        if (disparar_reset) {
+            disparar_reset = false;
+            status_local = "RESET TI";
+            atualizar_oled_seguro("SISTEMA: RESET", "MODO EMERGENCY", "CIRCUITO ABERTO");
+            digitalWrite(PIN_RELE, LOW);
+            vTaskDelay(pdMS_TO_TICKS(5000));
+            digitalWrite(PIN_RELE, HIGH);
+            status_local = "ONLINE";
+            atualizar_oled_seguro("IP: " + meu_ip, "Temp: " + String(temp_local, 1) + " C", "Status: " + status_local);
+        }
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+}
+
+void taskClima(void* pvParameters) {
+    for(;;) {
+        if (status_local == "ONLINE" && xSemaphoreTake(i2cMutex, pdMS_TO_TICKS(200)) == pdTRUE) {
+            Wire.beginTransmission(0x40);
+            Wire.write(0x00);
+            Wire.endTransmission();
+            vTaskDelay(pdMS_TO_TICKS(40));
+
+            if(Wire.requestFrom(0x40, 4) == 4) {
+                uint16_t t_raw = (Wire.read() << 8) | Wire.read();
+                uint16_t u_raw = (Wire.read() << 8) | Wire.read();
+                temp_local = (t_raw / 65536.0) * 165.0 - 40.0;
+                umid_local = (u_raw / 65536.0) * 100.0;
+            }
+            xSemaphoreGive(i2cMutex);
+
+            if (mqttClient.connected()) {
+                mqttClient.publish(TOPIC_TEMP, String(temp_local, 2).c_str());
+                vTaskDelay(pdMS_TO_TICKS(300));
+                mqttClient.publish(TOPIC_UMID, String(umid_local, 2).c_str());
+            }
+
+            atualizar_oled_seguro("IP:" + meu_ip, "T:" + String(temp_local, 1) + "C U:" + String(umid_local, 1) + "%", "Status: " + status_local);
+        }
+        vTaskDelay(pdMS_TO_TICKS(10000));
+    }
+}
+
+// ==========================================
+// SETUP
+// ==========================================
+void setup() {
+    WRITE_PERI_REG(RTC_CNTL_BIAS_CONF_REG, READ_PERI_REG(RTC_CNTL_BIAS_CONF_REG) & ~RTC_CNTL_BIAS_CONF_REG);
+    Serial.begin(115200);
+    
+    pinMode(PIN_RELE, OUTPUT);
+    digitalWrite(PIN_RELE, HIGH);
+    pinMode(PIN_BOTAO, INPUT_PULLUP);
+    attachInterrupt(digitalPinToInterrupt(PIN_BOTAO), tratar_botao_local, FALLING);
+
+    i2cMutex = xSemaphoreCreateMutex();
+    Wire.begin(PIN_SDA, PIN_SCL, 100000);
+
+    if(!LittleFS.begin(true)){
+        Serial.println("Falha ao montar LittleFS");
+    } else {
+        if(!LittleFS.exists("/fotos")) LittleFS.mkdir("/fotos");
+    }
+
+    if(oled.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+        oled.clearDisplay();
+        oled.display();
+    }
+
+    log_sistema("--- Inicializando KiiRA v2.0 C++ ---");
+
+    // Configurando Camera OV5640
+    camera_config_t config;
+    config.ledc_channel = LEDC_CHANNEL_0;
+    config.ledc_timer = LEDC_TIMER_0;
+    config.pin_d0 = Y2_GPIO_NUM;
+    config.pin_d1 = Y3_GPIO_NUM;
+    config.pin_d2 = Y4_GPIO_NUM;
+    config.pin_d3 = Y5_GPIO_NUM;
+    config.pin_d4 = Y6_GPIO_NUM;
+    config.pin_d5 = Y7_GPIO_NUM;
+    config.pin_d6 = Y8_GPIO_NUM;
+    config.pin_d7 = Y9_GPIO_NUM;
+    config.pin_xclk = XCLK_GPIO_NUM;
+    config.pin_pclk = PCLK_GPIO_NUM;
+    config.pin_vsync = VSYNC_GPIO_NUM;
+    config.pin_href = HREF_GPIO_NUM;
+    config.pin_sccb_sda = SIOD_GPIO_NUM;
+    config.pin_sccb_scl = SIOC_GPIO_NUM;
+    config.pin_pwdn = -1;
+    config.pin_reset = -1;
+    config.xclk_freq_hz = 20000000;
+    config.pixel_format = PIXFORMAT_JPEG;
+    config.frame_size = FRAMESIZE_QVGA;
+    config.jpeg_quality = 12;
+    config.fb_count = 1;
+    config.fb_location = CAMERA_FB_IN_PSRAM;
+
+    if (esp_camera_init(&config) == ESP_OK) {
+        log_sistema("Modulo optico OV5640 ativo (QVGA).");
+    } else {
+        log_sistema("Falha critica no sensor optico.");
+    }
+
+    // Wi-Fi
+    WiFi.begin(WIFI_SSID, WIFI_PASS);
+    int tentativa = 0;
+    atualizar_oled_seguro("Conectando Wi-Fi", "Tentando rede:", WIFI_SSID);
+    
+    while (WiFi.status() != WL_CONNECTED && tentativa < 20) {
+        delay(500);
+        tentativa++;
+    }
+
+    if (WiFi.status() == WL_CONNECTED) {
+        meu_ip = WiFi.localIP().toString();
+        log_sistema("Conectado com IP: " + meu_ip);
+        atualizar_oled_seguro("Wi-Fi: OK", "IP: " + meu_ip, "Adafruit Conn...");
+        
+        mqttClient.setServer(MQTT_BROKER, MQTT_PORT);
+        mqttClient.setCallback(mqtt_callback);
+        String clientId = "kiira_" + String(random(10, 99));
+        if (mqttClient.connect(clientId.c_str(), ADAFRUIT_USER, ADAFRUIT_KEY)) {
+            mqttClient.subscribe(TOPIC_CMD);
+            log_sistema("Sincronizado com Adafruit.");
+            atualizar_oled_seguro("IP: " + meu_ip, "ADAFRUIT: ATIVO", "SISTEMA ONLINE");
+        }
+    } else {
+        WiFi.disconnect();
+        WiFi.softAP("Gestor_Kiira", "kiira2026");
+        meu_ip = WiFi.softAPIP().toString();
+        log_sistema("Modo AP Operacional. SSID: Gestor_Kiira | IP: 192.168.4.1");
+        atualizar_oled_seguro("REDE: GESTOR_KIIRA", "PAINEL WEB PRONTO", "IP: " + meu_ip);
+    }
+
+    server.on("/", handleRoot);
+    server.on("/index.html", handleRoot);
+    server.on("/video", handleVideo);
+    server.on("/capturar_agora", handleCapture);
+    server.on("/ver", handleView);
+    server.on("/deletar", handleDeletar);
+    server.on("/action_reset", handleReset);
+    server.begin();
+    log_sistema("Servidor HTTP ativo na porta 8080.");
+
+    xTaskCreatePinnedToCore(taskReset, "TaskReset", 2048, NULL, 1, NULL, 1);
+    xTaskCreatePinnedToCore(taskClima, "TaskClima", 4096, NULL, 1, NULL, 1);
+}
+
+void loop() {
+    server.handleClient();
+    if (WiFi.status() == WL_CONNECTED) {
+        mqttClient.loop();
+    }
+    delay(2);
+}
