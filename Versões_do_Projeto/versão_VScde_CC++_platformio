@@ -68,7 +68,6 @@ volatile bool disparar_reset = false;
 unsigned long ultimo_clique = 0;
 const int LIMITE_FOTOS = 10;
 
-// Historico de Logs Web
 std::vector<String> historico_logs;
 SemaphoreHandle_t i2cMutex;
 
@@ -82,7 +81,6 @@ void log_sistema(String texto) {
     }
 }
 
-// Interrupcao do Botao Fisico
 void IRAM_ATTR tratar_botao_local() {
     unsigned long agora = millis();
     if (agora - ultimo_clique > 300) {
@@ -91,7 +89,6 @@ void IRAM_ATTR tratar_botao_local() {
     }
 }
 
-// Atualizacao segura do OLED
 void atualizar_oled_seguro(String l1, String l2, String l3) {
     if (xSemaphoreTake(i2cMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
         oled.clearDisplay();
@@ -109,7 +106,19 @@ void atualizar_oled_seguro(String l1, String l2, String l3) {
     }
 }
 
-// Callback do MQTT
+void verificar_conexao_mqtt() {
+    if (WiFi.status() == WL_CONNECTED) {
+        if (!mqttClient.connected()) {
+            String clientId = "kiira_" + String(random(10, 99));
+            if (mqttClient.connect(clientId.c_str(), ADAFRUIT_USER, ADAFRUIT_KEY)) {
+                mqttClient.subscribe(TOPIC_CMD);
+                log_sistema("MQTT Reconectado com sucesso.");
+            }
+        }
+        mqttClient.loop();
+    }
+}
+
 void mqtt_callback(char* topic, byte* payload, unsigned int length) {
     String msg = "";
     for (unsigned int i = 0; i < length; i++) msg += (char)payload[i];
@@ -123,7 +132,6 @@ void mqtt_callback(char* topic, byte* payload, unsigned int length) {
 // ROTAS DO SERVIDOR HTTP
 // ==========================================
 
-// Rota 1: Video Stream (MJPEG de fluxo continuo e estável)
 void handleVideo() {
     WiFiClient client = server.client();
     client.println("HTTP/1.1 200 OK");
@@ -131,6 +139,8 @@ void handleVideo() {
     client.println();
 
     while (client.connected()) {
+        verificar_conexao_mqtt();
+
         camera_fb_t* fb = esp_camera_fb_get();
         if (!fb) {
             vTaskDelay(pdMS_TO_TICKS(10));
@@ -142,21 +152,31 @@ void handleVideo() {
         client.print("\r\n");
         
         esp_camera_fb_return(fb);
-        
-        // Controle de taxa de atualizacao (Frame Rate)
         vTaskDelay(pdMS_TO_TICKS(50));
     }
 }
 
-// Rota 2: Home Dashboard Principal HTML
-void handleRoot() {
-    String img_tag = "<img id='video_feed' src='http://" + meu_ip + ":8080/video'><p style='color:#34d399; font-size:12px; margin:5px 0 0 0;'>Transmissao QVGA Ativa (OV5640)</p>";
-    String classe_status = (status_local == "ONLINE") ? "online" : "resetting";
-    
+void handleJSONData() {
     String texto_logs = "";
     for(const auto& log : historico_logs) texto_logs += log + "\n";
 
-    // Varre o LittleFS para montar a lista da galeria de forma segura e limpa
+    String json = "{";
+    json += "\"temp\":" + String(temp_local, 1) + ",";
+    json += "\"umid\":" + String(umid_local, 1) + ",";
+    json += "\"status\":\"" + status_local + "\",";
+    json += "\"logs\":\"" + texto_logs + "\"";
+    json += "}";
+    
+    server.send(200, "application/json", json);
+}
+
+void handleRoot() {
+    String img_tag = "<img id='video_feed' src='http://" + meu_ip + ":8080/video'><p style='color:#34d399; font-size:12px; margin:5px 0 0 0;'>Transmissao QVGA Ativa (OV5640)</p>";
+    
+    // CORREÇÃO DO ERRO: Recriando a variável texto_logs localmente para o HTML inicial carregar sem erro
+    String texto_logs = "";
+    for(const auto& log : historico_logs) texto_logs += log + "\n";
+
     String itens_html = "";
     File root = LittleFS.open("/fotos");
     if(!root || !root.isDirectory()) {
@@ -168,7 +188,6 @@ void handleRoot() {
             String fname = String(file.name());
             if(fname.endsWith(".jpg")) {
                 count++;
-                // Correção: Uso de entidade HTML segura (&#128193;) no lugar de emoji bruto para evitar "ðŸ“‚"
                 itens_html += "<div class='item-arquivo'><span>&#128193; " + fname + "</span><div>";
                 itens_html += "<a href='/ver?file=" + fname + "' target='_blank' class='btn-view'>VER</a>";
                 itens_html += "<a href='/deletar?file=" + fname + "' class='btn-del'>DELETAR</a></div></div>";
@@ -178,7 +197,6 @@ void handleRoot() {
         if(count == 0) itens_html = "<div style='color:#64748b; font-style:italic; text-align:center; padding-top:20px;'>Nenhuma foto salva na Flash.</div>";
     }
 
-    // Template HTML
     String html = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\r\n";
     html += "<!DOCTYPE html><html><head><title>Gestor Kiira</title><meta name='viewport' content='width=device-width, initial-scale=1'>";
     html += "<style>body{font-family:'Segoe UI',Arial;background:#0f172a;color:#f8fafc;margin:0;padding:20px;display:flex;flex-direction:column;align-items:center;}";
@@ -187,27 +205,36 @@ void handleRoot() {
     html += ".card-video,.card-galeria{width:100%;max-width:440px;}.card-serial{width:100%;max-width:940px;background:#020617;}";
     html += ".val{font-size:32px;font-weight:bold;}.status{padding:6px 16px;border-radius:20px;font-weight:bold;}.online{background:#065f46;color:#34d399;}.resetting{background:#991b1b;color:#fca5a5;}";
     html += ".btn{background:#10b981;color:white;border:none;padding:14px 28px;border-radius:8px;cursor:pointer;text-decoration:none;text-align:center;width:80%;margin-top:5px;font-weight:bold;}";
-    html += "pre{color:#4ade80;background:#020617;width:100%;white-space:pre-wrap;}img{width:100%;max-height:260px;border-radius:8px;background:#020617;}";
+    html += "pre{color:#4ade80;background:#020617;width:100%;white-space:pre-wrap;max-height:150px;overflow-y:auto;}img{width:100%;max-height:260px;border-radius:8px;background:#020617;}";
     html += ".item-arquivo{display:flex;justify-content:space-between;align-items:center;background:#334155;padding:8px 12px;margin-bottom:6px;border-radius:6px;}";
-    html += ".btn-view{background:#38bdf8;color:#0f172a;padding:4px 10px;text-decoration:none;font-weight:bold;}.btn-del{background:#ef4444;color:white;padding:4px 10px;text-decoration:none;margin-left:5px;}</style></head><body>";
+    html += ".btn-view{background:#38bdf8;color:#0f172a;padding:4px 10px;text-decoration:none;font-weight:bold;}.btn-del{background:#ef4444;color:white;padding:4px 10px;text-decoration:none;margin-left:5px;}</style>";
+    
+    html += "<script>setInterval(function(){";
+    html += "fetch('/dados_atualizados').then(response=>response.json()).then(data=>{";
+    html += "document.getElementById('t_val').innerText = data.temp + '°C';";
+    html += "document.getElementById('u_val').innerText = data.umid + ' %';";
+    html += "let stBox = document.getElementById('status_box'); stBox.innerText = data.status;";
+    html += "if(data.status=='ONLINE'){stBox.className='status online'}else{stBox.className='status resetting'}";
+    html += "document.getElementById('log_box').innerText = data.logs;";
+    html += "});}, 2000);</script>";
+    
+    html += "</head><body>";
     html += "<h2>Gestor KiiRA 2.0</h2><div class='container'>";
     
-    // CORREÇÃO: Ícone de câmera substituído pelo código numérico seguro &#128247;
     html += "<div class='card card-video'><h3>Monitoramento de Video</h3>" + img_tag + "<a href='/capturar_agora' class='btn'>&#128247; DISPARAR E SALVAR FOTO</a></div>";
     
-    html += "<div><div class='card'><span>Temperatura do Rack</span><div class='val'>" + String(temp_local, 1) + "&deg;C</div></div>";
-    html += "<div class='card'><span>Umidade do Ambiente</span><div class='val'>" + String(temp_local, 1) + " %</div></div>"; // Nota: Mantive a variável que estava no seu código original
+    html += "<div><div class='card'><span>Temperatura do Rack</span><div class='val' id='t_val'>" + String(temp_local, 1) + "&deg;C</div></div>";
+    html += "<div class='card'><span>Umidade do Ambiente</span><div class='val' id='u_val'>" + String(umid_local, 1) + " %</div></div>";
     
-    // CORREÇÃO: Letra Ç substituída pela entidade de renderização &Ccedil;
-    html += "<div class='card'><span>Status da Placa</span><div class='status " + classe_status + "'>" + status_local + "</div><a href='/action_reset' class='btn' style='background:#e11d48;'>FOR&Ccedil;AR HARD RESET</a></div></div>";
+    String classe_status = (status_local == "ONLINE") ? "online" : "resetting";
+    html += "<div class='card'><span>Status da Placa</span><div id='status_box' class='status " + classe_status + "'>" + status_local + "</div><a href='/action_reset' class='btn' style='background:#e11d48;'>FOR&Ccedil;AR HARD RESET</a></div></div>";
     
     html += "<div class='card card-galeria'><h3>Galeria Interna (LittleFS)</h3><div class='lista-arquivos'>" + itens_html + "</div><a href='/' class='btn' style='background:#475569;'>ATUALIZAR</a></div>";
-    html += "<div class='card card-serial'><span>Monitor Serial Web</span><pre>" + texto_logs + "</pre></div></div></body></html>";
+    html += "<div class='card card-serial'><span>Monitor Serial Web</span><pre id='log_box'>" + texto_logs + "</pre></div></div></body></html>";
     
     server.send(200, "text/html", html);
 }
 
-// Rota 3: Salvar foto no LittleFS de forma veloz (Sem ordenação ou buscas lentas)
 void handleCapture() {
     int total_arquivos = 0;
     String primeiro_arquivo = "";
@@ -215,7 +242,6 @@ void handleCapture() {
     File root = LittleFS.open("/fotos");
     File file = root.openNextFile();
     
-    // Contagem direta e simplificada para liberar espaço se necessário
     while(file) {
         if(String(file.name()).endsWith(".jpg")) {
             total_arquivos++;
@@ -230,7 +256,6 @@ void handleCapture() {
         LittleFS.remove("/fotos/" + primeiro_arquivo);
     }
 
-    // Correção: Gerando ID baseado no millis() para salvar instantaneamente sem travar a thread da câmera
     unsigned long foto_id = millis() % 100000;
     String nome_final = "/fotos/foto_" + String(foto_id) + ".jpg";
 
@@ -249,7 +274,6 @@ void handleCapture() {
     server.send(303, "text/plain", "");
 }
 
-// Rota 4: Ver foto individual
 void handleView() {
     String filename = server.arg("file");
     File f = LittleFS.open("/fotos/" + filename, FILE_READ);
@@ -261,7 +285,6 @@ void handleView() {
     f.close();
 }
 
-// Rota 5: Deletar foto
 void handleDeletar() {
     String filename = server.arg("file");
     LittleFS.remove("/fotos/" + filename);
@@ -270,7 +293,6 @@ void handleDeletar() {
     server.send(303, "text/plain", "");
 }
 
-// Rota 6: Reset Remoto Web
 void handleReset() {
     disparar_reset = true;
     server.sendHeader("Location", "/");
@@ -353,7 +375,6 @@ void setup() {
 
     log_sistema("--- Inicializando KiiRA v2.0 C++ ---");
 
-    // Configurando Camera OV5640
     camera_config_t config;
     config.ledc_channel = LEDC_CHANNEL_0;
     config.ledc_timer = LEDC_TIMER_0;
@@ -376,7 +397,7 @@ void setup() {
     config.xclk_freq_hz = 20000000;
     config.pixel_format = PIXFORMAT_JPEG;
     config.frame_size = FRAMESIZE_QVGA;
-    config.jpeg_quality = 15;               // Qualidade otimizada para diminuir tamanho de arquivos gravados na Flash
+    config.jpeg_quality = 15;              
     config.fb_count = 1;                    
     config.fb_location = CAMERA_FB_IN_DRAM; 
 
@@ -386,7 +407,6 @@ void setup() {
         log_sistema("Falha critica no sensor optico.");
     }
 
-    // Wi-Fi
     WiFi.begin(WIFI_SSID, WIFI_PASS);
     int tentativa = 0;
     atualizar_oled_seguro("Conectando Wi-Fi", "Tentando rede:", WIFI_SSID);
@@ -403,12 +423,7 @@ void setup() {
         
         mqttClient.setServer(MQTT_BROKER, MQTT_PORT);
         mqttClient.setCallback(mqtt_callback);
-        String clientId = "kiira_" + String(random(10, 99));
-        if (mqttClient.connect(clientId.c_str(), ADAFRUIT_USER, ADAFRUIT_KEY)) {
-            mqttClient.subscribe(TOPIC_CMD);
-            log_sistema("Sincronizado com Adafruit.");
-            atualizar_oled_seguro("IP: " + meu_ip, "ADAFRUIT: ATIVO", "SISTEMA ONLINE");
-        }
+        verificar_conexao_mqtt();
     } else {
         WiFi.disconnect();
         WiFi.softAP("Gestor_Kiira", "kiira2026");
@@ -420,6 +435,7 @@ void setup() {
     server.on("/", handleRoot);
     server.on("/index.html", handleRoot);
     server.on("/video", handleVideo);
+    server.on("/dados_atualizados", handleJSONData); 
     server.on("/capturar_agora", handleCapture);
     server.on("/ver", handleView);
     server.on("/deletar", handleDeletar);
@@ -433,8 +449,6 @@ void setup() {
 
 void loop() {
     server.handleClient();
-    if (WiFi.status() == WL_CONNECTED) {
-        mqttClient.loop();
-    }
+    verificar_conexao_mqtt(); 
     delay(2);
 }
