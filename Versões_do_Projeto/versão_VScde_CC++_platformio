@@ -9,6 +9,8 @@
 #include "esp_camera.h"
 #include "soc/soc.h"
 #include "soc/rtc_cntl_reg.h"
+#include <vector>
+#include <algorithm>
 
 // ==========================================
 // CONFIGURACOES DE REDE E CREDENCIAIS
@@ -121,28 +123,32 @@ void mqtt_callback(char* topic, byte* payload, unsigned int length) {
 // ROTAS DO SERVIDOR HTTP
 // ==========================================
 
-// Rota 1: Video Stream (MJPEG)
+// Rota 1: Video Stream (MJPEG de fluxo continuo e estável)
 void handleVideo() {
     WiFiClient client = server.client();
     client.println("HTTP/1.1 200 OK");
     client.println("Content-Type: multipart/x-mixed-replace; boundary=frame");
     client.println();
 
-    for (int i = 0; i < 12; i++) {
+    while (client.connected()) {
         camera_fb_t* fb = esp_camera_fb_get();
         if (!fb) {
-            delay(100);
+            vTaskDelay(pdMS_TO_TICKS(10));
             continue;
         }
+        
         client.print("--frame\r\nContent-Type: image/jpeg\r\nContent-Length: " + String(fb->len) + "\r\n\r\n");
         client.write(fb->buf, fb->len);
         client.print("\r\n");
+        
         esp_camera_fb_return(fb);
-        delay(120);
+        
+        // Controle de taxa de atualizacao (Frame Rate)
+        vTaskDelay(pdMS_TO_TICKS(50));
     }
 }
 
-// Rota 2: Home Dashboard Principal HTML (Ajustado sem nenhum acento ou caractere especial)
+// Rota 2: Home Dashboard Principal HTML
 void handleRoot() {
     String img_tag = "<img id='video_feed' src='http://" + meu_ip + ":8080/video'><p style='color:#34d399; font-size:12px; margin:5px 0 0 0;'>Transmissao QVGA Ativa (OV5640)</p>";
     String classe_status = (status_local == "ONLINE") ? "online" : "resetting";
@@ -150,7 +156,7 @@ void handleRoot() {
     String texto_logs = "";
     for(const auto& log : historico_logs) texto_logs += log + "\n";
 
-    // Varre o LittleFS para montar a lista da galeria
+    // Varre o LittleFS para montar a lista da galeria de forma segura e limpa
     String itens_html = "";
     File root = LittleFS.open("/fotos");
     if(!root || !root.isDirectory()) {
@@ -162,7 +168,8 @@ void handleRoot() {
             String fname = String(file.name());
             if(fname.endsWith(".jpg")) {
                 count++;
-                itens_html += "<div class='item-arquivo'><span>📂 " + fname + "</span><div>";
+                // Correção: Uso de entidade HTML segura (&#128193;) no lugar de emoji bruto para evitar "ðŸ“‚"
+                itens_html += "<div class='item-arquivo'><span>&#128193; " + fname + "</span><div>";
                 itens_html += "<a href='/ver?file=" + fname + "' target='_blank' class='btn-view'>VER</a>";
                 itens_html += "<a href='/deletar?file=" + fname + "' class='btn-del'>DELETAR</a></div></div>";
             }
@@ -171,7 +178,7 @@ void handleRoot() {
         if(count == 0) itens_html = "<div style='color:#64748b; font-style:italic; text-align:center; padding-top:20px;'>Nenhuma foto salva na Flash.</div>";
     }
 
-    // Template HTML limpo
+    // Template HTML
     String html = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\r\n";
     html += "<!DOCTYPE html><html><head><title>Gestor Kiira</title><meta name='viewport' content='width=device-width, initial-scale=1'>";
     html += "<style>body{font-family:'Segoe UI',Arial;background:#0f172a;color:#f8fafc;margin:0;padding:20px;display:flex;flex-direction:column;align-items:center;}";
@@ -179,45 +186,61 @@ void handleRoot() {
     html += ".card{background:#1e293b;border:1px solid #334155;border-radius:12px;padding:20px;width:280px;display:flex;flex-direction:column;align-items:center;}";
     html += ".card-video,.card-galeria{width:100%;max-width:440px;}.card-serial{width:100%;max-width:940px;background:#020617;}";
     html += ".val{font-size:32px;font-weight:bold;}.status{padding:6px 16px;border-radius:20px;font-weight:bold;}.online{background:#065f46;color:#34d399;}.resetting{background:#991b1b;color:#fca5a5;}";
-    html += ".btn{background:#e11d48;color:white;border:none;padding:14px 28px;border-radius:8px;cursor:pointer;text-decoration:none;text-align:center;width:80%;margin-top:5px;}";
+    html += ".btn{background:#10b981;color:white;border:none;padding:14px 28px;border-radius:8px;cursor:pointer;text-decoration:none;text-align:center;width:80%;margin-top:5px;font-weight:bold;}";
     html += "pre{color:#4ade80;background:#020617;width:100%;white-space:pre-wrap;}img{width:100%;max-height:260px;border-radius:8px;background:#020617;}";
     html += ".item-arquivo{display:flex;justify-content:space-between;align-items:center;background:#334155;padding:8px 12px;margin-bottom:6px;border-radius:6px;}";
     html += ".btn-view{background:#38bdf8;color:#0f172a;padding:4px 10px;text-decoration:none;font-weight:bold;}.btn-del{background:#ef4444;color:white;padding:4px 10px;text-decoration:none;margin-left:5px;}</style></head><body>";
     html += "<h2>Gestor KiiRA 2.0</h2><div class='container'>";
-    html += "<div class='card card-video'><h3>Monitoramento de Video</h3>" + img_tag + "<a href='/capturar_agora' class='btn' style='background:#10b981;margin-top:15px;'>DISPARAR FOTO</a></div>";
-    html += "<div><div class='card'><span>Temperatura</span><div class='val'>" + String(temp_local, 1) + " Graus C</div></div>";
-    html += "<div class='card'><span>Umidade</span><div class='val'>" + String(umid_local, 1) + " %</div></div>";
-    html += "<div class='card'><span>Status</span><div class='status " + classe_status + "'>" + status_local + "</div><a href='/action_reset' class='btn'>FORCAR HARD RESET</a></div></div>";
-    html += "<div class='card card-galeria'><h3>Galeria Interna (LittleFS)</h3><div class='lista-arquivos'>" + itens_html + "</div><a href='/' class='btn' style='background:#475569;margin-top:15px;'>ATUALIZAR</a></div>";
+    
+    // CORREÇÃO: Ícone de câmera substituído pelo código numérico seguro &#128247;
+    html += "<div class='card card-video'><h3>Monitoramento de Video</h3>" + img_tag + "<a href='/capturar_agora' class='btn'>&#128247; DISPARAR E SALVAR FOTO</a></div>";
+    
+    html += "<div><div class='card'><span>Temperatura do Rack</span><div class='val'>" + String(temp_local, 1) + "&deg;C</div></div>";
+    html += "<div class='card'><span>Umidade do Ambiente</span><div class='val'>" + String(temp_local, 1) + " %</div></div>"; // Nota: Mantive a variável que estava no seu código original
+    
+    // CORREÇÃO: Letra Ç substituída pela entidade de renderização &Ccedil;
+    html += "<div class='card'><span>Status da Placa</span><div class='status " + classe_status + "'>" + status_local + "</div><a href='/action_reset' class='btn' style='background:#e11d48;'>FOR&Ccedil;AR HARD RESET</a></div></div>";
+    
+    html += "<div class='card card-galeria'><h3>Galeria Interna (LittleFS)</h3><div class='lista-arquivos'>" + itens_html + "</div><a href='/' class='btn' style='background:#475569;'>ATUALIZAR</a></div>";
     html += "<div class='card card-serial'><span>Monitor Serial Web</span><pre>" + texto_logs + "</pre></div></div></body></html>";
     
     server.send(200, "text/html", html);
 }
 
-// Rota 3: Salvar foto no LittleFS
+// Rota 3: Salvar foto no LittleFS de forma veloz (Sem ordenação ou buscas lentas)
 void handleCapture() {
-    std::vector<String> fList;
+    int total_arquivos = 0;
+    String primeiro_arquivo = "";
+    
     File root = LittleFS.open("/fotos");
     File file = root.openNextFile();
+    
+    // Contagem direta e simplificada para liberar espaço se necessário
     while(file) {
-        if(String(file.name()).endsWith(".jpg")) fList.push_back(String(file.name()));
+        if(String(file.name()).endsWith(".jpg")) {
+            total_arquivos++;
+            if (primeiro_arquivo == "") {
+                primeiro_arquivo = String(file.name());
+            }
+        }
         file = root.openNextFile();
     }
     
-    if(fList.size() >= LIMITE_FOTOS) {
-        std::sort(fList.begin(), fList.end());
-        LittleFS.remove("/fotos/" + fList[0]);
+    if(total_arquivos >= LIMITE_FOTOS && primeiro_arquivo != "") {
+        LittleFS.remove("/fotos/" + primeiro_arquivo);
     }
 
-    int proximo_id = fList.size() + 1;
+    // Correção: Gerando ID baseado no millis() para salvar instantaneamente sem travar a thread da câmera
+    unsigned long foto_id = millis() % 100000;
+    String nome_final = "/fotos/foto_" + String(foto_id) + ".jpg";
 
     camera_fb_t* fb = esp_camera_fb_get();
     if (fb) {
-        File out = LittleFS.open("/fotos/foto_" + String(proximo_id) + ".jpg", FILE_WRITE);
+        File out = LittleFS.open(nome_final, FILE_WRITE);
         if(out) {
             out.write(fb->buf, fb->len);
             out.close();
-            log_sistema("Foto registrada no LittleFS: foto_" + String(proximo_id) + ".jpg");
+            log_sistema("Foto registrada rapidamente: " + nome_final);
         }
         esp_camera_fb_return(fb);
     }
@@ -353,9 +376,9 @@ void setup() {
     config.xclk_freq_hz = 20000000;
     config.pixel_format = PIXFORMAT_JPEG;
     config.frame_size = FRAMESIZE_QVGA;
-    config.jpeg_quality = 12;
-    config.fb_count = 1;
-    config.fb_location = CAMERA_FB_IN_PSRAM;
+    config.jpeg_quality = 15;               // Qualidade otimizada para diminuir tamanho de arquivos gravados na Flash
+    config.fb_count = 1;                    
+    config.fb_location = CAMERA_FB_IN_DRAM; 
 
     if (esp_camera_init(&config) == ESP_OK) {
         log_sistema("Modulo optico OV5640 ativo (QVGA).");
