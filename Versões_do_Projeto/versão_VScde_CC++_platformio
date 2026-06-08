@@ -139,8 +139,6 @@ void handleVideo() {
     client.println();
 
     while (client.connected()) {
-        verificar_conexao_mqtt();
-
         camera_fb_t* fb = esp_camera_fb_get();
         if (!fb) {
             vTaskDelay(pdMS_TO_TICKS(10));
@@ -173,7 +171,6 @@ void handleJSONData() {
 void handleRoot() {
     String img_tag = "<img id='video_feed' src='http://" + meu_ip + ":8080/video'><p style='color:#34d399; font-size:12px; margin:5px 0 0 0;'>Transmissao QVGA Ativa (OV5640)</p>";
     
-    // CORREÇÃO DO ERRO: Recriando a variável texto_logs localmente para o HTML inicial carregar sem erro
     String texto_logs = "";
     for(const auto& log : historico_logs) texto_logs += log + "\n";
 
@@ -335,7 +332,7 @@ void taskClima(void* pvParameters) {
             }
             xSemaphoreGive(i2cMutex);
 
-            if (mqttClient.connected()) {
+            if (WiFi.status() == WL_CONNECTED && mqttClient.connected()) {
                 mqttClient.publish(TOPIC_TEMP, String(temp_local, 2).c_str());
                 vTaskDelay(pdMS_TO_TICKS(300));
                 mqttClient.publish(TOPIC_UMID, String(umid_local, 2).c_str());
@@ -407,13 +404,16 @@ void setup() {
         log_sistema("Falha critica no sensor optico.");
     }
 
-    WiFi.begin(WIFI_SSID, WIFI_PASS);
-    int tentativa = 0;
-    atualizar_oled_seguro("Conectando Wi-Fi", "Tentando rede:", WIFI_SSID);
-    
-    while (WiFi.status() != WL_CONNECTED && tentativa < 20) {
-        delay(500);
-        tentativa++;
+    // Se SSID estiver em branco, pula direto pro Modo AP sem esperar timeouts inúteis
+    if (String(WIFI_SSID) != "") {
+        WiFi.begin(WIFI_SSID, WIFI_PASS);
+        int tentativa = 0;
+        atualizar_oled_seguro("Conectando Wi-Fi", "Tentando rede:", WIFI_SSID);
+        
+        while (WiFi.status() != WL_CONNECTED && tentativa < 10) {
+            delay(500);
+            tentativa++;
+        }
     }
 
     if (WiFi.status() == WL_CONNECTED) {
@@ -423,7 +423,6 @@ void setup() {
         
         mqttClient.setServer(MQTT_BROKER, MQTT_PORT);
         mqttClient.setCallback(mqtt_callback);
-        verificar_conexao_mqtt();
     } else {
         WiFi.disconnect();
         WiFi.softAP("Gestor_Kiira", "kiira2026");
@@ -449,6 +448,6 @@ void setup() {
 
 void loop() {
     server.handleClient();
-    verificar_conexao_mqtt(); 
+    verificar_conexao_mqtt(); // Roda a verificação de rede de forma segura fora do fluxo de vídeo
     delay(2);
 }
