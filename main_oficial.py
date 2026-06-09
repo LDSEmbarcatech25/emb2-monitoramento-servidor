@@ -134,7 +134,7 @@ async def atualizar_oled_seguro(linha1, line2, linha3):
         async with i2c_lock:
             try:
                 oled.fill(0)  
-                oled.text("Gestor_Kiira", 5, 0)
+                oled.text("BVW MANAGER", 5, 0)
                 oled.text("----------------", 0, 10)
                 oled.text(linha1, 0, 25)
                 oled.text(line2, 0, 40)
@@ -285,7 +285,7 @@ HTML_TEMPLATE = """HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Gestor Kiira - Painel Operacional</title>
+    <title>BVW MANAGER - Painel Operacional</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
         body {{ font-family: 'Segoe UI', Arial, sans-serif; background: #0f172a; color: #f8fafc; margin: 0; padding: 20px; display: flex; flex-direction: column; align-items: center; }}
@@ -311,7 +311,7 @@ HTML_TEMPLATE = """HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n
     </style>
 </head>
 <body>
-    <h2>Gestor KiiRA 2.0</h2>
+    <h2>BVW MANAGER</h2>
     <div class="sub">Centro de Controle Operacional de TI (Armazenamento LittleFS)</div>
     <div class="container">
         
@@ -541,12 +541,12 @@ async def main():
         
         ap = network.WLAN(network.AP_IF)
         ap.active(True)
-        ap.config(essid="Gestor_Kiira", password="kiira2026")
+        ap.config(essid="BVW MANAGER", password="bvw2026")
         
         await asyncio.sleep(1.0) 
         meu_ip = "192.168.4.1"
-        log_sistema("Modo AP Operacional. SSID: Gestor_Kiira | IP: 192.168.4.1")
-        await atualizar_oled_seguro("REDE: GESTOR_KIIRA", "PAINEL WEB PRONTO", f"IP: {meu_ip}")
+        log_sistema("Modo AP Operacional. SSID: BVW MANAGER | IP: 192.168.4.1")
+        await atualizar_oled_seguro("REDE: BVW MANAGER", "PAINEL WEB PRONTO", f"IP: {meu_ip}")
     else:
         await atualizar_oled_seguro("Wi-Fi: OK", f"IP: {meu_ip}", "Adafruit Conn...")
         try:
