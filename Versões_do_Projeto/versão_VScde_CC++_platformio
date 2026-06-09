@@ -95,7 +95,7 @@ void atualizar_oled_seguro(String l1, String l2, String l3) {
         oled.setTextSize(1);
         oled.setTextColor(SSD1306_WHITE);
         oled.setCursor(5, 0);
-        oled.print("Gestor_Kiira");
+        oled.print("BVW MANAGER");
         oled.setCursor(0, 10);
         oled.print("----------------");
         oled.setCursor(0, 25);  oled.print(l1);
@@ -216,7 +216,7 @@ void handleRoot() {
     html += "});}, 2000);</script>";
     
     html += "</head><body>";
-    html += "<h2>Gestor KiiRA 2.0</h2><div class='container'>";
+    html += "<h2>BVW MANAGER</h2><div class='container'>";
     
     html += "<div class='card card-video'><h3>Monitoramento de Video</h3>" + img_tag + "<a href='/capturar_agora' class='btn'>&#128247; DISPARAR E SALVAR FOTO</a></div>";
     
@@ -370,7 +370,7 @@ void setup() {
         oled.display();
     }
 
-    log_sistema("--- Inicializando KiiRA v2.0 C++ ---");
+    log_sistema("--- Inicializando BVW MANAGER C++ ---");
 
     camera_config_t config;
     config.ledc_channel = LEDC_CHANNEL_0;
@@ -425,10 +425,10 @@ void setup() {
         mqttClient.setCallback(mqtt_callback);
     } else {
         WiFi.disconnect();
-        WiFi.softAP("Gestor_Kiira", "kiira2026");
+        WiFi.softAP("BVW_MANAGER", "bvw2026");
         meu_ip = WiFi.softAPIP().toString();
-        log_sistema("Modo AP Operacional. SSID: Gestor_Kiira | IP: 192.168.4.1");
-        atualizar_oled_seguro("REDE: GESTOR_KIIRA", "PAINEL WEB PRONTO", "IP: " + meu_ip);
+        log_sistema("Modo AP Operacional. SSID: BVW_MANAGER | IP: 192.168.4.1");
+        atualizar_oled_seguro("REDE: BVW_MANAGER", "PAINEL WEB PRONTO", "IP: " + meu_ip);
     }
 
     server.on("/", handleRoot);
