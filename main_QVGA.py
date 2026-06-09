@@ -1,7 +1,6 @@
 # =============================================================================
 # RESIDÊNCIA TIC37 - EMBARCATECH
-# PROJETO: DISPOSITIVO IoT PARA MONITORAMENTO DE SERVIDOR E INFRAESTRUTURA DE REDE
-# VERÇÃO: 2.1 (Estabilizada e Otimizada)
+# PROJETO: DISPOSITIVO IoT PARA MONITORAMENTO DE SERVIDOR E INFRAESTRUTURA DE REDE (DASHBOARD, GALERIA LITTLEFS & TELEMETRIA ADAFRUIT)
 # =============================================================================
 import machine
 import time
@@ -11,7 +10,7 @@ import random
 import usocket as socket
 import ustruct as struct
 import os
-import gc  # Gerenciamento estrito de memória RAM
+import gc  # CORREÇÃO: Módulo necessário para gerenciar e limpar a memória RAM
 from ssd1306 import SSD1306_I2C
 from camera import Camera, GrabMode, PixelFormat, FrameSize
 
@@ -42,7 +41,7 @@ except Exception as e:
 # =============================================================================
 LISTA_WIFI = [
     {"ssid": "ITSelf", "pass": "code2020"},       
-    {"ssid": "SUA_REDE_RESERVA", "pass": "SUA_SENHA"},         
+    {"ssid": "", "pass": ""},         
     {"ssid": "", "pass": ""}                     
 ]
 
@@ -58,7 +57,7 @@ TOPIC_UMIDADE = f"{ADAFRUIT_USER}/feeds/umidade".encode()
 TOPIC_COMANDOS = f"{ADAFRUIT_USER}/feeds/comandos".encode()
 
 # =============================================================================
-# 2. DEFINIÇÃO DE PINOS DA PLACA KiiRA v2.0
+# 2. DEFINIÇÃO DE PINOS DA PLACA KiiRA v2.0 (CONFORME MANUAL)
 # =============================================================================
 PIN_RELE = 48  
 PIN_BOTAO = 46  
@@ -83,30 +82,30 @@ i2c_global = None
 oled = None
 hdc_endereco = 0x40  
 hardware_ok = False
-cam_obj = None  # Objeto global da câmera
+cam_obj = None  # Objeto global que guardará a instância da câmera
 
 i2c_lock = asyncio.Lock()
-cam_lock = asyncio.Lock() # Lock para evitar conflito entre stream e captura de foto
 
 def tratar_botao_local(pino):
     global disparar_reset, ultimo_clique
     agora = time.ticks_ms()
     if time.ticks_diff(agora, ultimo_clique) > 300:
-        ultimo_clique = agora # CORRIGIDO: Removido 'grandmother' inexistente
+        ultimo_clique = agora
         log_sistema("Reset manual acionado via Botão Físico!")
         disparar_reset = True
 
 botao_local.irq(handler=tratar_botao_local, trigger=machine.Pin.IRQ_FALLING)
 
 # =============================================================================
-# 4. INTERFACE DE HARDWARE E INICIALIZAÇÃO DA CÂMERA
+# 4. INTERFACE DE HARDWARE E INICIALIZAÇÃO DA CÂMERA (CORRIGIDA)
 # =============================================================================
 def inicializar_hardware():
     global i2c_global, oled, hardware_ok, cam_obj
     
+    # Limpa a RAM acumulada antes de tentar subir o hardware pesado
     gc.collect()
     
-    # Inicialização do Barramento I2C
+    # Inicialização do Barramento I2C compartilhado (Display e Sensor HDC)
     try:
         i2c_global = machine.I2C(0, scl=machine.Pin(PIN_SCL), sda=machine.Pin(PIN_SDA), freq=100000)
         log_sistema("Barramento I2C físico unificado a 100kHz.")
@@ -119,8 +118,9 @@ def inicializar_hardware():
     except Exception as e:
         log_sistema(f"Falha ao erguer barramento elemental: {e}")
 
-    # Inicialização da Câmera
+    # Inicialização por construtor de classe da Câmera
     try:
+        # CORREÇÃO CRÍTICA: Mudança de FrameSize.VGA para FrameSize.QVGA para evitar estouro de RAM (Loop de Reset)
         cam_obj = Camera(
             data_pins=[11, 9, 8, 10, 12, 18, 17, 16],
             pclk_pin=13, vsync_pin=6, href_pin=7, sda_pin=4, scl_pin=5, xclk_pin=15,
@@ -134,15 +134,15 @@ def inicializar_hardware():
         cam_obj = None
         log_sistema(f"Falha crítica na inicialização da câmera: {e}")
 
-async def atualizar_oled_seguro(linha1, linha2, linha3):
+async def atualizar_oled_seguro(linha1, line2, linha3):
     if hardware_ok and oled is not None:
         async with i2c_lock:
             try:
                 oled.fill(0)  
-                oled.text("Gestor_Kiira", 5, 0)
+                oled.text("BVW MANAGER", 5, 0)
                 oled.text("----------------", 0, 10)
                 oled.text(linha1, 0, 25)
-                oled.text(linha2, 0, 40)
+                oled.text(line2, 0, 40)
                 oled.text(linha3, 0, 55)
                 oled.show()  
             except Exception:
@@ -284,13 +284,13 @@ async def loop_escuta_broker():
         await asyncio.sleep_ms(200)
 
 # =============================================================================
-# 7. TEMPLATE HTML DO DASHBOARD
+# 7. TEMPLATE HTML DO DASHBOARD REVISADO COM GALERIA INTERNA OTIMIZADA
 # =============================================================================
 HTML_TEMPLATE = """HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Gestor Kiira - Painel Operacional</title>
+    <title>BVW MANAGER - Painel Operacional</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
         body {{ font-family: 'Segoe UI', Arial, sans-serif; background: #0f172a; color: #f8fafc; margin: 0; padding: 20px; display: flex; flex-direction: column; align-items: center; }}
@@ -316,7 +316,7 @@ HTML_TEMPLATE = """HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n
     </style>
 </head>
 <body>
-    <h2>Gestor KiiRA 2.0</h2>
+    <h2>BVW MANAGER</h2>
     <div class="sub">Centro de Controle Operacional de TI (Armazenamento LittleFS)</div>
     <div class="container">
         
@@ -360,7 +360,7 @@ HTML_TEMPLATE = """HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n
 """
 
 # =============================================================================
-# 8. WEB SERVER ASSÍNCRONO CORRIGIDO (NÃO TRAVANTE)
+# 8. WEB SERVER MODERNO (CHAMADAS AJUSTADAS PARA CLASSE DA CÂMERA)
 # =============================================================================
 async def loop_servidor_video():
     global cam_obj
@@ -370,12 +370,12 @@ async def loop_servidor_video():
     server_socket.listen(3) 
     server_socket.setblocking(False)
     
-    log_sistema("Servidor HTTP ativo na porta 8080.")
+    log_sistema("Servidor HTTP ativo e blindado na porta 8080.")
 
     while True:
         client_sock = None
         try:
-            await asyncio.sleep_ms(10) # Pausa curta para ceder tempo a outras tarefas
+            await asyncio.sleep_ms(20) 
             try:
                 client_sock, addr = server_socket.accept()
             except OSError:
@@ -384,9 +384,10 @@ async def loop_servidor_video():
             client_sock.settimeout(2.0)
             requisicao = client_sock.recv(1024).decode()
             
+            # Executa a limpeza preventiva de memória a cada requisição aceita
             gc.collect()
             
-            # --- ROTA 1: FLUXO DE VÍDEO (STREAM REAL SEGURO) ---
+            # --- ROTA 1: FLUXO DE VÍDEO (STREAM) ---
             if "GET /video" in requisicao:
                 if cam_obj is None:
                     client_sock.write(b"HTTP/1.1 404 Not Found\r\n\r\n")
@@ -394,24 +395,19 @@ async def loop_servidor_video():
                     continue
                 
                 client_sock.write(b"HTTP/1.1 200 OK\r\nContent-Type: multipart/x-mixed-replace; boundary=frame\r\n\r\n")
-                
-                # Streaming limitado por requisição para evitar congelamento do uasyncio
-                for _ in range(100): # Envia 100 quadros por conexão e fecha de forma limpa (o browser reabre automaticamente)
+                for _ in range(12): 
                     try:
-                        async with cam_lock:
-                            quadro = cam_obj.capture()  
+                        quadro = cam_obj.capture()  
                         if quadro:
                             client_sock.write(b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: " + str(len(quadro)).encode() + b"\r\n\r\n" + quadro + b"\r\n")
-                        
-                        if cam_obj: cam_obj.free_buffer()
-                        await asyncio.sleep_ms(60) # Taxa fluida dando vazão para o uasyncio rodar outras tarefas
-                    except Exception:
+                    except:
                         break
+                    finally:
+                        if cam_obj: cam_obj.free_buffer() 
+                    await asyncio.sleep_ms(120)
+                client_sock.close()
                 
-                try: client_sock.close()
-                except: pass
-                
-            # --- ROTA 2: HOME DASHBOARD ---
+            # --- ROTA 2: HOME DASHBOARD (MONTA A LISTA DE FOTOS) ---
             elif "GET / " in requisicao or "GET /index" in requisicao:
                 if cam_obj is not None:
                     img_tag = f"<img id='video_feed' src='http://{meu_ip}:8080/video'><p style='color:#34d399; font-size:12px; margin:5px 0 0 0;'>Transmissão QVGA Ativa (OV5640)</p>"
@@ -421,6 +417,7 @@ async def loop_servidor_video():
                 classe_status = 'online' if status_local == 'ONLINE' else 'resetting'
                 texto_serial = "\n".join(historico_logs)
                 
+                # Escaneia diretório LittleFS para renderizar os botões da galeria
                 arquivos = [f for f in os.listdir("/fotos") if f.endswith(".jpg")]
                 arquivos.sort()
                 
@@ -443,11 +440,10 @@ async def loop_servidor_video():
                 client_sock.write(html.encode('utf-8'))
                 client_sock.close()
                 
-            # --- ROTA 3: DISPARADOR DA CÂMERA ---
+            # --- ROTA 3: DISPARADOR DA CÂMERA (GERENCIA ATÉ 10 FOTOS AUTOMÁTICO) ---
             elif "GET /capturar_agora" in requisicao:
                 if cam_obj is not None:
                     try:
-                        gc.collect()
                         arquivos = [f for f in os.listdir("/fotos") if f.endswith(".jpg")]
                         
                         if len(arquivos) >= LIMITE_FOTOS:
@@ -457,22 +453,20 @@ async def loop_servidor_video():
                         numeros = [int(f.split('_')[1].split('.')[0]) for f in arquivos if '_' in f]
                         proximo_id = max(numeros) + 1 if numeros else 1
                         
-                        async with cam_lock: # Protege o buffer contra o stream simultâneo
-                            foto = cam_obj.capture()  
+                        foto = cam_obj.capture()  
                         if foto: 
                             with open(f"/fotos/foto_{proximo_id}.jpg", "wb") as f:
                                 f.write(foto)
-                            log_sistema(f"Foto registrada na Flash: foto_{proximo_id}.jpg")
+                            log_sistema(f"Foto registrada no LittleFS: foto_{proximo_id}.jpg")
                     except Exception as e: 
-                        log_sistema(f"Erro na captura Flash: {e}")
+                        log_sistema(f"Erro na captura LittleFS: {e}")
                     finally:
                         if cam_obj: cam_obj.free_buffer()
-                        gc.collect()
                         
                 client_sock.write(b"HTTP/1.1 303 See Other\r\nLocation: /\r\n\r\n")
                 client_sock.close()
                 
-            # --- ROTA 4: VISUALIZAÇÃO INDIVIDUAL ---
+            # --- ROTA 4: VISUALIZAÇÃO/DOWNLOAD INDIVIDUAL EM BLOCOS ---
             elif "GET /ver?file=" in requisicao:
                 try:
                     nome_arquivo = requisicao.split("file=")[1].split(" ")[0]
@@ -483,18 +477,18 @@ async def loop_servidor_video():
                     client_sock.write(header)
                     
                     with open(caminho_completo, "rb") as f:
-                        while chunk := f.read(1024): # Chunk reduzido para estabilidade de RAM
+                        while chunk := f.read(2048):
                             client_sock.write(chunk)
                 except:
                     client_sock.write(b"HTTP/1.1 404 Not Found\r\n\r\n")
                 client_sock.close()
 
-            # --- ROTA 5: EXCLUSÃO DE FOTO ---
+            # --- ROTA 5: EXCLUSÃO DE FOTO DA GALERIA ---
             elif "GET /deletar?file=" in requisicao:
                 try:
                     nome_arquivo = requisicao.split("file=")[1].split(" ")[0]
                     os.remove(f"/fotos/{nome_arquivo}")
-                    log_sistema(f"Removido da Flash: {nome_arquivo}")
+                    log_sistema(f"Arquivo removido da Flash: {nome_arquivo}")
                 except: 
                     pass
                 client_sock.write(b"HTTP/1.1 303 See Other\r\nLocation: /\r\n\r\n")
@@ -515,7 +509,7 @@ async def loop_servidor_video():
                 except: pass
 
 # =============================================================================
-# 9. ORQUESTRAÇÃO GERAL
+# 9. ORQUESTRAÇÃO GERAL (CONEXÃO WI-FI COM CONTINGÊNCIA EM MODO AP)
 # =============================================================================
 async def main():
     global meu_ip, sock_global
@@ -555,12 +549,12 @@ async def main():
         
         ap = network.WLAN(network.AP_IF)
         ap.active(True)
-        ap.config(essid="Gestor_Kiira", password="kiira2026")
+        ap.config(essid="BVW MANAGER", password="bvw2026")
         
         await asyncio.sleep(1.0) 
         meu_ip = "192.168.4.1"
-        log_sistema("Modo AP Operacional. SSID: Gestor_Kiira | IP: 192.168.4.1")
-        await atualizar_oled_seguro("REDE: GESTOR_KIIRA", "PAINEL WEB PRONTO", f"IP: {meu_ip}")
+        log_sistema("Modo AP Operacional. SSID: BVW MANAGER | IP: 192.168.4.1")
+        await atualizar_oled_seguro("REDE: BVW MANAGER", "PAINEL WEB PRONTO", f"IP: {meu_ip}")
     else:
         await atualizar_oled_seguro("Wi-Fi: OK", f"IP: {meu_ip}", "Adafruit Conn...")
         try:
@@ -571,7 +565,7 @@ async def main():
         except:
             log_sistema("Aviso: Nuvem Adafruit indisponível no momento.")
 
-    # Inicializa os loops concorrentes
+    # Inicializa todos os loops assíncronos e paralelos simultaneamente
     await asyncio.gather(
         loop_telemetria_clima(),
         loop_escuta_broker(),
